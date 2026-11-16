@@ -14,44 +14,9 @@ from multiprocessing import Queue as pqueue
 import logging
 logging.basicConfig(format='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%Y-%m-%d,%H:%M:%S', filename='router.log', filemode='w', level=logging.INFO)
 
-# GPU id -> NUMA-local cores of a JURECA DC-GPU node; clients are pinned there.
-NUMA_CORES = {0: list(range(48, 64)), 1: list(range(16, 32)),
-              2: list(range(112, 128)), 3: list(range(80, 96))}
-TORPOR = os.environ['TORPOR']
-CLIENT_SIF = os.environ.get('CLIENT_SIF',
-    f'{TORPOR}/images/torpor-client.sif')
-os.makedirs('logs_fig11', exist_ok=True)
-
-# Per-variant directory for the clients' own logs (set by run_fig11_variant.sh),
-# so the variants at one function count do not overwrite each other's logs.
-CLIENT_LOG_DIR = os.environ.get('CLIENT_LOG_DIR', 'logs_fig11')
-os.makedirs(CLIENT_LOG_DIR, exist_ok=True)
-
-# Client endpoints listen on CLIENT_PORT_BASE + client_id. Upstream uses 9000,
-# which puts client 100 on port 9100, taken by node_exporter on JURECA nodes.
-CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
-
-# Optional copy of the model weights on the node's tmpfs, staged by the sbatch
-# scripts. Faster model loads make overlapping loads on one server (and the
-# registration race they trigger, see README) less likely. Apptainer gives the
-# container its own /dev/shm, so the staged tree needs an explicit bind.
-# Unset: clients read $TORPOR/models directly.
-MODEL_CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', '')
-if MODEL_CACHE_DIR:
-    MODEL_CACHE_BIND = f'--bind {MODEL_CACHE_DIR}:/models '
-    TORCH_HOME = '/models/torch'
-    HF_HOME = '/models/hf'
-else:
-    MODEL_CACHE_BIND = ''
-    TORCH_HOME = f'{TORPOR}/models/torch'
-    HF_HOME = f'{TORPOR}/models/hf'
-
 bert_ddl = 0.2
 bert_function = set()
 bert_batch_size = 1
-# Seconds a function is skipped after a request timeout. Upstream skips it for
-# the rest of the run.
-UNHEALTHY_COOLDOWN = 10
 
 class SocketCache():
     def __init__(self, context):
@@ -108,91 +73,39 @@ def container_manager(server_id):
 
             if flag == '0':
                 client_id = msg
-                relaunches = 0
-                max_relaunches = 5
                 while True:
                     logging.info(f'Try launching {client_id} on server {server_id}')
                     is_success = False
-                    if relaunches > 0:
-                        # kill the client left by the previous failed attempt
-                        os.system(f'pkill -KILL -f "endpoint.py {client_id + CLIENT_PORT_BASE}$" 2>/dev/null')
                     if model_name == 'mixed':
                         mod_n = get_mixed_model_name(client_id)
                         if mod_n == 'bertqa':
                             bert_function.add(client_id)
-
-                        core = NUMA_CORES[server_id][(client_id // server_num) % 16]
-                        # Run the client in its log directory so the log_client_*.txt
-                        # it writes to its cwd lands there (Docker's --rm used to
-                        # discard them).
-                        os.system(
-                            f'taskset -c {core} apptainer exec '
-                            f'--bind /dev/shm/ipc:/cuda '
-                            f'{MODEL_CACHE_BIND}'
-                            f'--bind {os.getcwd()}/{CLIENT_LOG_DIR}:/workspace '
-                            f'--env OMP_NUM_THREADS=1,KMP_DUPLICATE_LIB_OK=TRUE,model_name={mod_n},'
-                            f'TORCH_HOME={TORCH_HOME},'
-                            f'HF_HOME={HF_HOME},'
-                            f'HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1 '
-                            f'--pwd /workspace '
-                            f'{CLIENT_SIF} bash /start_with_server_id.sh {client_id} {server_id} /endpoint.py {client_id + CLIENT_PORT_BASE} '
-                            f'> {CLIENT_LOG_DIR}/client_{client_id}.log 2>&1 &'
-                        )
-                    
+                        os.system(f'docker run --rm --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={mod_n} --network=host --ipc=host -v /dev/shm/ipc:/cuda --name client-{client_id} standalone-client bash /start_with_server_id.sh {client_id} {server_id} endpoint.py {client_id + 9000} &')
                     else:
-                        core = NUMA_CORES[server_id][(client_id // server_num) % 16]
-                        os.system(
-                            f'taskset -c {core} apptainer exec '
-                            f'--bind /dev/shm/ipc:/cuda '
-                            f'--bind {os.getcwd()}/logs_fig11:/workspace '
-                            f'--env OMP_NUM_THREADS=1,KMP_DUPLICATE_LIB_OK=TRUE,model_name={model_name} '
-                            f'--pwd /workspace '
-                            f'{CLIENT_SIF} bash /start_with_server_id.sh {client_id} {server_id} /endpoint.py {client_id + CLIENT_PORT_BASE} '
-                            f'> logs_fig11/client_{client_id}.log 2>&1 &')
+                        os.system(f'docker run --rm --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={model_name} --network=host --ipc=host -v /dev/shm/ipc:/cuda --name client-{client_id} standalone-client bash /start_with_server_id.sh {client_id} {server_id} endpoint.py {client_id + 9000} &')
                     time.sleep(8)
-                    # The first request triggers the model load and can be slow.
-                    # Keep polling while the client process is alive; relaunch
-                    # only once it has died.
-                    died = False
-                    while True:
-                        for attempt in range(4):
-                            try:
-                                x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + client_id), headers={"cur_server" : str(server_id), "batch_size": str(bert_batch_size if client_id in bert_function else batch_size_limit)}, timeout=5)
-                                # x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
-                                # endpoint.py always answers with JSON; anything
-                                # else is a foreign process on this port.
-                                try:
-                                    x.json()
-                                except ValueError:
-                                    logging.error(f'Port {CLIENT_PORT_BASE + client_id} answered by a foreign process, not endpoint.py -- port collision. Resp: {x.text[:200]!r}')
-                                    raise
-                                logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} resp: {x.text}')
-                                router_pusher.send_pyobj(('0', client_id))
-                            except:
-                                logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} timeout at attempt {attempt}')
-                                if os.system(f'pgrep -f "endpoint.py {client_id + CLIENT_PORT_BASE}\\$" > /dev/null 2>&1') != 0:
-                                    died = True
-                                    break
-                                time.sleep(5)
-                            else:
-                                is_success = True
-                                break
-                        if is_success or died:
+                    for attempt in range(4):
+                        try:
+                            x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(bert_batch_size if client_id in bert_function else batch_size_limit)}, timeout=5)
+                            # x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
+                            logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} resp: {x.text}')
+                            router_pusher.send_pyobj(('0', client_id))
+                        except:
+                            logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} timeout at attempt {attempt}')
+                            time.sleep(5)
+                        else:
+                            is_success = True
                             break
                     if is_success:
                         break
-                    relaunches += 1
-                    if relaunches > max_relaunches:
-                        logging.error(f'Client {client_id} on server {server_id} still not up after {relaunches} relaunches, giving up')
-                        break
-
+        
             elif flag == '1': # execute
                 func_id, issue_t, arrival_t = msg
                 
                 # logging.info(f'Handle request {func_id}')
                 start_t = time.time()
                 try:
-                    x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + func_id), headers={"cur_server" : str(server_id), "batch_size" : str(len(arrival_t))}, timeout=5)
+                    x = requests.get('http://localhost:' + str(9000 + func_id), headers={"cur_server" : str(server_id), "batch_size" : str(len(arrival_t))}, timeout=5)
                 except Exception as e:
                     logging.info(f'Func {func_id} on server {server_id} timeout')
                     router_pusher.send_pyobj(('2', func_id))
@@ -232,7 +145,7 @@ class Router():
         self.schedule_queue = queue.Queue()
         self.pool = ThreadPoolExecutor(max_workers=2)
 
-        self.timeout_func = {}
+        self.timeout_func = set()
         self.sockets = SocketCache(self.context)
         for i in range(server_num):
             reader_p = Process(target=container_manager, args=(i,))
@@ -487,7 +400,7 @@ class Router():
         server_id = self.send_signal(req, self.sockets)
 
         req_start_t = time.time()
-        x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + func), headers={"cur_server" : str(server_id), "batch_size": str(1)})
+        x = requests.get('http://localhost:' + str(9000 + func), headers={"cur_server" : str(server_id), "batch_size": str(1)})
         req_end_t = time.time()
         return x.text
     
@@ -518,10 +431,9 @@ class Router():
                 if target_func >= 0:
                     cur_t = time.time()
                     # logging.info(f'Get request {target_func} at {cur_t}')
-                    if target_func in self.timeout_func and cur_t - self.timeout_func[target_func] < UNHEALTHY_COOLDOWN:
+                    if target_func in self.timeout_func:
                         logging.info(f'Ignore unhealthy func {target_func}')
                     else:
-                        self.timeout_func.pop(target_func, None)
                         self.schedule_queue.put((0, (target_func, cur_t)))
                 elif target_func == -1:
                     # clear up and warm up
@@ -579,7 +491,7 @@ class Router():
                 
                 elif flag == '2':
                     func_id = sched_msg
-                    self.timeout_func[func_id] = time.time()
+                    self.timeout_func.add(func_id)
             
             end_t = time.time()
             if end_t - start_t > 2: # adjust request queue
@@ -613,8 +525,6 @@ if perform_launch:
     router = Router(server_num, func_num=args.l, sa_policy=is_sa_policy)
     for i in range(args.l, func_num):
         router.launch(i)
-        # Stagger client launches: lowers the rate of model-registration
-        # failures in the server (see README). Upstream has no pause here.
         time.sleep(2)
 else:
     router = Router(server_num, func_num=func_num, sa_policy=is_sa_policy)

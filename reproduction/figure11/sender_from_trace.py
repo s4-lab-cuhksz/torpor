@@ -7,7 +7,7 @@ import numpy as np
 context = zmq.Context(1)
 sender_socket = context.socket(zmq.PUSH)
 sender_socket.connect('ipc:///dev/shm/ipc/externel_service')
-data_path = '../../tools'
+data_path = '../tools'
 
 class Sender:
     def __init__(self, func_num, mins):
@@ -16,23 +16,15 @@ class Sender:
         # new
         trace_file = f'{data_path}/req_arrivals_{func_num}_{mins}min_trace.npy'
         if os.path.isfile(trace_file):
-            loaded = np.load(trace_file)
-            # Regenerate if the cached trace references functions >= func_num.
-            if len(loaded) > 0 and max(int(f) for _, f in loaded) < func_num:
-                self.req_arrivals = loaded
-            else:
-                print(f'Trace file {trace_file} has out-of-range function ids for func_num={func_num}, regenerating')
-                self.req_arrivals = []
+            self.req_arrivals = np.load(trace_file)
         # if os.path.isfile(f'{data_path}/req_arrivals_{func_num}_trace.npy'):
             # self.req_arrivals = np.load(f'{data_path}/req_arrivals_{func_num}_trace.npy')
         else:
-            self.req_arrivals = []
-        if len(self.req_arrivals) == 0:
             self.pattern = np.load(f'{data_path}/samples.npy')
             if mins > 31:
                 raise ValueError(f"Requested {mins} minutes, but only 31 available in samples.npy.")
-            # Since samples.npy has only 203 functions and 31min, it should be changed here to True to allow repeated sampling
             chosen_indices = np.random.choice(len(self.pattern), func_num, replace=True)
+            # Since samples.npy has only 203 functions and 31min, it should be changed here to True to allow repeated sampling
             self.func_rate = [self.pattern[i][:mins] for i in chosen_indices]
             print(f'Sender sample size {len(self.pattern)}, using {mins} min per function')
 
