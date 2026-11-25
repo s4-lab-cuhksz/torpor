@@ -7,7 +7,7 @@ import numpy as np
 context = zmq.Context(1)
 sender_socket = context.socket(zmq.PUSH)
 sender_socket.connect('ipc:///dev/shm/ipc/externel_service')
-data_path = '../tools'
+data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../tools')
 
 class Sender:
     def __init__(self, func_num, mins):

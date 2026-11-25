@@ -1,6 +1,8 @@
 import time
 import sys
 import os
+import fcntl
+import socket
 import zmq
 from signal_pb2 import *
 import subprocess
@@ -13,6 +15,45 @@ from multiprocessing import Process
 from multiprocessing import Queue as pqueue
 import logging
 logging.basicConfig(format='%(asctime)s.%(msecs)03d: %(message)s', datefmt='%Y-%m-%d,%H:%M:%S', filename='router.log', filemode='w', level=logging.INFO)
+
+# JURECA port (see README.md): Apptainer clients pinned to the cores local to
+# their GPU, ports from CLIENT_PORT_BASE (9100 is node_exporter's), longer load
+# timeout, client loads serialized across the GPU managers.
+NUMA_CORES = {0: '48-63', 1: '16-31', 2: '112-127', 3: '80-95'}
+CLIENT_PORT_BASE = int(os.environ.get('CLIENT_PORT_BASE', 20000))
+CLIENT_INSTANCE = os.environ['CLIENT_INSTANCE']
+LOAD_TIMEOUT = 120
+SERIAL_LOAD = os.environ.get('SERIAL_LOAD', '1') == '1'
+os.makedirs('clients', exist_ok=True)
+
+def launch_client(client_id, server_id, model):
+    port = CLIENT_PORT_BASE + client_id
+    # a relaunch must not race the previous client for its port
+    if os.system(f'pkill -u "$USER" -f "endpoint.py {port}\\$"') == 0:
+        time.sleep(1)
+    os.system(f'taskset -c {NUMA_CORES[server_id]} apptainer exec --cleanenv '
+              f'--env OMP_NUM_THREADS=1,KMP_DUPLICATE_LIB_OK=TRUE,model_name={model} '
+              f'--env TORCH_HOME=/models/torch,HF_HOME=/models/hf,HF_HUB_OFFLINE=1,TRANSFORMERS_OFFLINE=1 '
+              f'instance://{CLIENT_INSTANCE} bash -c "cd /work && exec bash /start_with_server_id.sh {client_id} {server_id} /endpoint.py {port}" '
+              f'>> clients/client_{client_id}.log 2>&1 &')
+
+def wait_client_ready(client_id, limit=60):
+    # upstream sleeps 8 s; the client listens after about 3 s
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        try:
+            socket.create_connection(('localhost', CLIENT_PORT_BASE + client_id), timeout=1).close()
+            return
+        except OSError:
+            time.sleep(0.2)
+
+def load_lock():
+    # The server's ModelRepo is an unsynchronised std::map shared by all GPUs;
+    # concurrent loads corrupt it. Closing the file releases the lock.
+    f = open('.client_load.lock', 'a')
+    if SERIAL_LOAD:
+        fcntl.flock(f, fcntl.LOCK_EX)
+    return f
 
 bert_ddl = 0.2
 bert_function = set()
@@ -73,6 +114,7 @@ def container_manager(server_id):
 
             if flag == '0':
                 client_id = msg
+                lock = load_lock()
                 while True:
                     logging.info(f'Try launching {client_id} on server {server_id}')
                     is_success = False
@@ -80,14 +122,14 @@ def container_manager(server_id):
                         mod_n = get_mixed_model_name(client_id)
                         if mod_n == 'bertqa':
                             bert_function.add(client_id)
-                        os.system(f'docker run --rm --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={mod_n} --network=host --ipc=host -v /dev/shm/ipc:/cuda --name client-{client_id} standalone-client bash /start_with_server_id.sh {client_id} {server_id} endpoint.py {client_id + 9000} &')
+                        launch_client(client_id, server_id, mod_n)
                     else:
-                        os.system(f'docker run --rm --cpus=1 -e OMP_NUM_THREADS=1 -e KMP_DUPLICATE_LIB_OK=TRUE -e model_name={model_name} --network=host --ipc=host -v /dev/shm/ipc:/cuda --name client-{client_id} standalone-client bash /start_with_server_id.sh {client_id} {server_id} endpoint.py {client_id + 9000} &')
-                    time.sleep(8)
+                        launch_client(client_id, server_id, model_name)
+                    wait_client_ready(client_id)
                     for attempt in range(4):
                         try:
-                            x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(bert_batch_size if client_id in bert_function else batch_size_limit)}, timeout=5)
-                            # x = requests.get('http://localhost:' + str(9000 + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
+                            x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + client_id), headers={"cur_server" : str(server_id), "batch_size": str(bert_batch_size if client_id in bert_function else batch_size_limit)}, timeout=LOAD_TIMEOUT)
+                            # x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + client_id), headers={"cur_server" : str(server_id), "batch_size": str(1)}, timeout=5)
                             logging.info(f'ExecuteAfterLoad {client_id} on server {server_id} resp: {x.text}')
                             router_pusher.send_pyobj(('0', client_id))
                         except:
@@ -98,6 +140,7 @@ def container_manager(server_id):
                             break
                     if is_success:
                         break
+                lock.close()
         
             elif flag == '1': # execute
                 func_id, issue_t, arrival_t = msg
@@ -105,7 +148,7 @@ def container_manager(server_id):
                 # logging.info(f'Handle request {func_id}')
                 start_t = time.time()
                 try:
-                    x = requests.get('http://localhost:' + str(9000 + func_id), headers={"cur_server" : str(server_id), "batch_size" : str(len(arrival_t))}, timeout=5)
+                    x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + func_id), headers={"cur_server" : str(server_id), "batch_size" : str(len(arrival_t))}, timeout=5)
                 except Exception as e:
                     logging.info(f'Func {func_id} on server {server_id} timeout')
                     router_pusher.send_pyobj(('2', func_id))
@@ -400,7 +443,7 @@ class Router():
         server_id = self.send_signal(req, self.sockets)
 
         req_start_t = time.time()
-        x = requests.get('http://localhost:' + str(9000 + func), headers={"cur_server" : str(server_id), "batch_size": str(1)})
+        x = requests.get('http://localhost:' + str(CLIENT_PORT_BASE + func), headers={"cur_server" : str(server_id), "batch_size": str(1)})
         req_end_t = time.time()
         return x.text
     
@@ -525,7 +568,6 @@ if perform_launch:
     router = Router(server_num, func_num=args.l, sa_policy=is_sa_policy)
     for i in range(args.l, func_num):
         router.launch(i)
-        time.sleep(2)
 else:
     router = Router(server_num, func_num=func_num, sa_policy=is_sa_policy)
 router.run()
