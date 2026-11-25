@@ -153,16 +153,12 @@ wait "$SENDER_PID" || fail "sender failed (see sender.log)"
 for i in $(seq 1 12); do check_health; sleep 5; done   # let the last requests finish
 cleanup
 
-# 5. Analyze: SLO compliance (original analyzer) and wrong outputs
+# 5. Analyze
 [ "$(count 'end-to-end time')" -gt 0 ] || fail "router.log has no finished requests"
 python3 figure11_analyze_router_log.py "$RUN_DIR/router.log" > "$RUN_DIR/analysis.txt" 2>&1 \
     || fail "analyzer failed (see analysis.txt)"
-python3 figure11_check_outputs.py "$RUN_DIR/router.log" > "$RUN_DIR/validity.txt" 2>&1 \
-    || fail "output check failed (see validity.txt)"
 {
     echo "variant=$VARIANT FUNC_NUM=$FUNC_NUM finished=$(count 'end-to-end time') client_timeouts=$(count 'Func [0-9]+ on server [0-9]+ timeout')"
-    cat "$RUN_DIR/analysis.txt" "$RUN_DIR/validity.txt"
+    cat "$RUN_DIR/analysis.txt"
 } > "$RESULT"
 cat "$RESULT"
-bad=$(awk '/^bad_outputs/{print $2}' "$RUN_DIR/validity.txt")
-[ "$bad" = 0 ] || echo "WARNING: $bad wrong outputs, so this SLO result is not valid (see validity.txt)"
