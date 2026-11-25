@@ -14,7 +14,7 @@ reproduction.
 
 Patched binaries can be tested without building a new image: build the server
 into an overlay (see the READMEs), then point `SERVER_BIN` at it for
-`../figure11/run_fig11_variant.sh` or `../figure11/sbatch_fig11_probe320.sh`.
+`../figure11/run_fig11_variant.sh`.
 The binary is bind-mounted over `/server_bin/server`.
 
 The background (two races on per-server state in `cuda_server.hpp` and
