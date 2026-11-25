@@ -1,8 +1,6 @@
-# torpor-server.sif: upstream server plus two one-line fixes: host_addr in
-# model_repo.hpp and valid_memory_address in memory_manager.hpp.
-# Used for Table 4 (remoting, Swap-PCIe), Figures 6 to 11 and Figure 7 +Pinned,
-# +Pipeline and +Group. The results reported for Table 4 and Figures 6 to 10
-# ran on an earlier build with the host_addr fix only (see README.md).
+# torpor-server.sif: original server plus the host_addr (model_repo.hpp) and
+# valid_memory_address (memory_manager.hpp) fixes. Used for Table 4 (remoting,
+# Swap-PCIe), Figures 6 to 11 and Figure 7 +Pinned, +Pipeline and +Group.
 # Build from the repository root (see README.md in this directory):
 #   apptainer build torpor-server.sif reproduction/images/torpor-server.def
 Bootstrap: docker
