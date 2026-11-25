@@ -7,6 +7,7 @@ From: paulaugsten/torpor:server@sha256:0b6767fc116160b396c70c375a3b97e1349480335
 
 %files
     include/server/model_repo.hpp /gpu-swap/include/server/model_repo.hpp
+    include/server/memory_manager.hpp /gpu-swap/include/server/memory_manager.hpp
     evaluation2/table4/controller.hpp /gpu-swap/include/server/controller.hpp
 
 %post

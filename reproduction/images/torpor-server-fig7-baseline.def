@@ -1,6 +1,8 @@
 # torpor-server-fig7-baseline.sif: torpor-server with the pinned staging path in
 # memory_manager.hpp commented out, as described in upstream's
 # evaluation/figure7/Figure7_README.md. Used for Figure 7, Baseline.
+# The patch is applied on top of the repository's memory_manager.hpp, so this
+# image carries the same two server fixes as torpor-server.sif.
 # Build from the repository root (see README.md in this directory):
 #   apptainer build torpor-server-fig7-baseline.sif reproduction/images/torpor-server-fig7-baseline.def
 Bootstrap: docker
@@ -8,6 +10,7 @@ From: paulaugsten/torpor:server@sha256:0b6767fc116160b396c70c375a3b97e1349480335
 
 %files
     include/server/model_repo.hpp /gpu-swap/include/server/model_repo.hpp
+    include/server/memory_manager.hpp /gpu-swap/include/server/memory_manager.hpp
     reproduction/images/patches/fig7-baseline-memory_manager.patch /tmp/fig7-baseline.patch
 
 %post
