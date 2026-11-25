@@ -31,7 +31,7 @@ every server image built from the current `.def` files.
    `paulaugsten/torpor:{server,client,native}` (the digests are in the `.def`
    files).
 2. On JURECA they were converted with `apptainer build <name>.sif docker://...`.
-   The converted server image is kept as `torpor-server.sif`.
+   The converted server image is kept as `torpor-server-pristine.sif`.
 3. The variant images were built interactively: sandbox, copy the modified
    header into `/gpu-swap`, `make` in `/gpu-swap/build`, copy the binary into
    place, `apptainer build` the SIF.
@@ -39,8 +39,9 @@ every server image built from the current `.def` files.
 ## Definition files
 
 The `.def` files in this directory were written afterwards to document step 3
-reproducibly. **They were not used to build the original images.** The sources in each original SIF
-(`/gpu-swap/include`, `/gpu-swap/src`) were extracted and only differ in the following ways to the original:
+reproducibly. **They were not used to build the original images.** The sources
+in each original SIF (`/gpu-swap/include`, `/gpu-swap/src`) were extracted and
+compared file by file with the repository:
 
 | Original image                                                         | Sources are identical to                                |
 | ---------------------------------------------------------------------- | ------------------------------------------------------- |
