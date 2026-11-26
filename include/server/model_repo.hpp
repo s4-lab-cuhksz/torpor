@@ -149,7 +149,7 @@ public:
     }
 
     bool load_model_h2d_at_start(void* dst, const string &payload, size_t size, string& function){
-        uint64_t host_addr, block_addr = 0;
+        uint64_t host_addr = 0, block_addr = 0;
         for (auto &malloc_info : model_host_info_map_[function].model_block_info_) {
             if ((uint64_t) dst >= (uint64_t) malloc_info.first && (uint64_t) dst < (uint64_t) malloc_info.first + model_host_info_map_[function].virtual_blocks_[malloc_info.first].size_) {
                 host_addr = (uint64_t) dst - (uint64_t) malloc_info.first + (uint64_t) malloc_info.second.host_addr_;

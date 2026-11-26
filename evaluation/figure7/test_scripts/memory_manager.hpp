@@ -292,7 +292,7 @@ public:
 
     inline bool valid_memory_address(string& function, void* addr) {
         if (model_repo_.model_host_info_map_.find(function) != model_repo_.model_host_info_map_.end()) {
-            model_repo_.find_block_ephe_ptr_mapping(function, addr);
+            return model_repo_.find_block_ephe_ptr_mapping(function, addr);
         }
         return false;
     }
